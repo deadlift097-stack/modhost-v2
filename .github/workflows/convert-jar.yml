@@ -1,0 +1,96 @@
+name: Convert jar
+
+# Turns ordinary jars into jars Mod Host can load on a device (adds classes.dex and a descriptor).
+# Phone-friendly: upload a jar into the incoming/ folder of the repository and this runs by itself,
+# or start it by hand from the Actions tab.
+
+on:
+  push:
+    paths:
+      - 'incoming/*.jar'
+  workflow_dispatch:
+    inputs:
+      jar:
+        description: 'Path of one jar in the repository (empty = every jar in incoming/)'
+        required: false
+        default: ''
+      main:
+        description: 'Entry class, only if the jar has no usable metadata (single jar only)'
+        required: false
+        default: ''
+      id:
+        description: 'Mod id override (single jar only)'
+        required: false
+        default: ''
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Install build-tools and a platform
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "build-tools;34.0.0" "platforms;android-34"
+
+      - name: Build the host classes and AddJar
+        run: |
+          set -e
+          mkdir -p build/classes build/api
+          javac --release 8 -Xlint:-options -d build/classes $(find java/src java/tools -name '*.java')
+          jar --create --file build/modhost-api.jar -C build/classes .
+
+      - name: Convert
+        env:
+          INPUT_JAR: ${{ github.event.inputs.jar }}
+          INPUT_MAIN: ${{ github.event.inputs.main }}
+          INPUT_ID: ${{ github.event.inputs.id }}
+        run: |
+          set -u
+          export D8="$ANDROID_HOME/build-tools/34.0.0/d8"
+          mkdir -p converted
+          if [ -n "$INPUT_JAR" ]; then
+            jars=("$INPUT_JAR")
+          else
+            shopt -s nullglob
+            jars=(incoming/*.jar)
+          fi
+          if [ "${#jars[@]}" -eq 0 ]; then
+            echo "No jars found. Put one in incoming/ or give a path."
+            exit 1
+          fi
+          extra=()
+          if [ "${#jars[@]}" -eq 1 ]; then
+            [ -n "$INPUT_MAIN" ] && extra+=(--main "$INPUT_MAIN")
+            [ -n "$INPUT_ID" ] && extra+=(--id "$INPUT_ID")
+          fi
+          status=0
+          for jar in "${jars[@]}"; do
+            java -cp build/classes org.modhost.tools.AddJar "$jar" \
+              --out-dir converted \
+              --android-jar "$ANDROID_HOME/platforms/android-34/android.jar" \
+              --api-jar build/modhost-api.jar \
+              "${extra[@]}" || status=1
+          done
+          exit $status
+
+      - name: Upload converted mods
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: converted-mods
+          path: converted/*.jar
+          if-no-files-found: warn

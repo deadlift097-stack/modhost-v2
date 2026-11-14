@@ -1,0 +1,89 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test (Java, C++, Python)
+        run: |
+          set -e
+          mkdir -p build-test/classes build-test/tests
+          javac -Xlint:-options -d build-test/classes $(find java/src java/tools java/test/src -name '*.java')
+          java -cp build-test/classes org.modhost.jar.SelfTest
+          g++ -std=c++20 -Wall -Wextra -Isrc tests/jarscan_test.cpp src/mod/JarScan.cpp -o build-test/tests/jarscan_test
+          build-test/tests/jarscan_test
+          python3 tools/test_lua_tools.py
+
+      - name: Install NDK and Ninja
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-28" "ndk;28.2.13676358"
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Build Java bridge
+        run: |
+          set -e
+          PLATFORM_JAR="$ANDROID_HOME/platforms/android-28/android.jar"
+          D8="$(ls -d $ANDROID_HOME/build-tools/*/d8 | sort -V | tail -1)"
+          mkdir -p build-java/classes build-java/dex build-java/hello/classes build-java/hello/dex
+          javac --release 8 -Xlint:-options -d build-java/classes $(find java/src -name '*.java')
+          "$D8" --release --min-api 26 --lib "$PLATFORM_JAR" --output build-java/dex $(find build-java/classes -name '*.class')
+          python3 - <<'PYEOF'
+          data = open('build-java/dex/classes.dex', 'rb').read()
+          with open('src/mod/BridgeDex.inc', 'w') as f:
+              f.write('// Generated from the compiled Java bridge.\nstatic const unsigned char kBridgeDex[] = {\n')
+              for i in range(0, len(data), 16):
+                  f.write(','.join(str(b) for b in data[i:i + 16]) + ',\n')
+              f.write('0};\nstatic const unsigned int kBridgeDexSize = %d;\n' % len(data))
+          PYEOF
+          jar --create --file build-java/modhost-api.jar -C build-java/classes .
+          javac --release 8 -Xlint:-options -cp build-java/classes -d build-java/hello/classes examples/java/HelloJavaMod.java
+          "$D8" --release --min-api 26 --lib "$PLATFORM_JAR" --classpath build-java/classes --output build-java/hello/dex $(find build-java/hello/classes -name '*.class')
+          cp examples/java/modhost-mod.properties build-java/hello/dex/
+          (cd build-java/hello/dex && jar --create --file ../../hello-java-mod.jar classes.dex modhost-mod.properties)
+
+      - name: Build mod tools
+        run: |
+          set -e
+          mkdir -p build-java/tools-classes
+          javac --release 8 -Xlint:-options -d build-java/tools-classes $(find java/src java/tools -name '*.java')
+          jar --create --file build-java/modhost-tools.jar --main-class org.modhost.tools.AddJar -C build-java/tools-classes .
+
+      - name: Build packages
+        shell: pwsh
+        run: ./scripts/package.ps1 -Abi arm64-v8a
+
+      - name: Upload Mod Host
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod-host
+          path: build-*/*.levipack
+
+      - name: Upload Java API jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: modhost-api
+          path: build-java/modhost-api.jar
+
+      - name: Upload Hello Java mod
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-java-mod
+          path: build-java/hello-java-mod.jar
+
+      - name: Upload mod tools (AddJar)
+        uses: actions/upload-artifact@v4
+        with:
+          name: modhost-tools
+          path: build-java/modhost-tools.jar
