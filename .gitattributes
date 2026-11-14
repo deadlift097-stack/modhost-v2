@@ -1,0 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Generated files do not count towards the repository's language statistics.
+src/mod/BridgeDex.inc linguist-generated=true
+examples/converted/** linguist-generated=true
